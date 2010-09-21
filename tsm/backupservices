@@ -1,0 +1,211 @@
+#!/bin/sh
+
+
+# Purpose:
+# Perform the necessary operations before or after a backup.
+# Should be installed in all zones in /usr/local/bin/backupservices
+# and referenced in /nsr/res/$NetworkerGroup.res in the global zone. E.g.:
+# /nsr/res/Oracle.res
+#
+# type: savepnpc;
+# precmd: "/usr/local/bin/backupservices before";
+# pstcmd: "/usr/local/bin/backupservices after";
+# timeout: "08:00:00";
+# abort precmd with group: No;
+
+# The list of services to stop during backup should be given in
+# the file /nsr/res/services, one per line, in the order they have to
+# be restarted. E.g.
+# cat /nsr/res/services
+# mysql
+# httpd
+
+
+# Usage:
+# backupservices [ before | after ]
+
+# Example:
+# backupservices before
+
+# Authors:
+# DP: Dominique.Petitpierre@unige.ch
+
+# History:
+# 2007.06.01: DP, Created from old precmd script: added Log function, ZFS
+#             snapshots.
+# 2007.07.02: DP, Added handling of zones; check if rc script is enabled.
+# 2007.07.03: DP, Test if ZFS snapshots should be done; added Service file.
+# 2007.11.13: DP, create a clone of backup snapshot to avoid slow snapshot
+#             destroy bug; create /nsr/tmp and /nsr/res if missing.
+# 2007.11.17: DP, use date in snapshot names to avoid confusions;
+#             destroy old day of the week snapshot after backup
+#             then rename new daily snapshot
+# 2007.11.18: DP, change start/stop argument to before/after
+
+# To do:
+# - handle the case where one wants the whole zones to shutdown/reboot
+
+
+PATH=/usr/sbin:/usr/bin
+export PATH
+# make sure that "date" output does not depend on environement context
+LANG=C
+export LANG
+
+Cmd="$0"
+CmdBase=`basename "$Cmd"`
+CmdBase=`expr "$CmdBase" : "\([^.]*\).*"`
+LogFile=/nsr/tmp/$CmdBase.log
+Dollar="\$"
+
+if [ ! -d /nsr/tmp ]; then
+   mkdir -p /nsr/tmp
+fi
+if [ ! -d /nsr/res ]; then
+   mkdir -p /nsr/res
+fi
+
+#
+# function to log both on stdout and $LogFile
+Log () {
+   Date="`date '+%d/%m/%Y %T'`"
+   echo "savepnpc: $Date - $*"
+   echo "**** $Date - $*" >> $LogFile
+}
+
+
+# start services in /nsr/res/services if action is 'after'
+# start services in reverse order /nsr/res/services if action is 'before'
+ServiceAction () {
+   case "$1" in
+   before)
+      Action=stop
+      ;;
+   after)
+      Action=start
+      ;;
+   esac
+   Zones=`zoneadm list | grep -v "^$MyZone$Dollar"`
+   for Zone in $Zones ; do
+      zlogin $Zone "test -f $Cmd && $Cmd $1" >> $LogFile 2>&1
+   done
+   if [ -f /nsr/res/services ]; then
+      StartServices=`cat /nsr/res/services`
+   fi
+   # list in which order services are to be stopped or started
+   if [ "$Action" = "stop" ]; then
+      # reverse the order list of the services when we stop them
+      for Service in $StartServices ; do
+         StopServices="$Service $StopServices"
+      done
+      Verb="stopping"
+      Services="$StopServices"
+   else
+      Verb="starting"
+      Services="$StartServices"
+   fi
+   for Service in $Services ; do
+      # find out if the service is enabled in run level 3
+      Script=`ls -L /etc/rc3.d/S* | grep "/S[0-9][0-9]$Service$Dollar"`
+      if [ "$Script" != "" ]; then
+         Log "$Verb service '$Service' in zone $MyZone"
+         sh $Script $Action >> $LogFile 2>&1
+      fi
+   done
+}
+
+#
+# check the argument of the commands
+if [ $# -ne 1 ]; then
+    echo "Usage: $CmdBase [before | after] " >/dev/stderr
+    exit 1
+fi
+Phase="$1"
+case "$Phase" in
+   before|after)
+      ;;
+   * )
+      Error 2 "phase '$1' is not supported"
+      ;;
+esac
+
+#
+# rotate logs when we are in the phase "before"
+if [ "$Phase" = "before" ]; then
+   j=9
+   while [ $j -gt 0 ] ; do
+      i=`expr $j - 1`
+      if [ -f $LogFile.$i ]; then
+         mv $LogFile.$i $LogFile.$j
+      fi
+      j=$i
+   done
+   if [ -f $LogFile ]; then
+      mv $LogFile $LogFile.0
+   fi
+fi
+
+#
+#
+MyZone=`zonename`
+Log "Begin '$CmdBase $Phase' on zone $MyZone"
+
+if [ "$MyZone" != "global" ]; then
+   ServiceAction $Phase
+else
+   if [ -f /usr/sbin/zfs ]; then
+      if df -F zfs | egrep -s . ; then
+         if [ -f /usr/local/bin/zfsallsnap ]; then
+            DoZfsSnapshots=1
+         fi
+      fi
+   fi
+   if [ "$DoZfsSnapshots" = "1" ]; then
+      if [ "$Phase" = "before" ]; then
+         # stopping disk modifying services in all zones
+         ServiceAction before
+         SnapDate=`date '+%A_%Y.%m.%d_%H:%M'`
+         echo "$SnapDate" >/nsr/tmp/snapshotdate
+         DaySnap="@newdaily:$SnapDate"
+         Log "Cloning $DaySnap ZFS snapshots to '.backup'"
+         # taking this opportunity to take also the snapshot of the day
+         /usr/local/bin/zfsallsnap snapshot --backup --clobber --destroyclones $DaySnap >> $LogFile 2>&1
+         # clone this snapshot with special name ".backup" known in
+         # Networker savesets
+         /usr/local/bin/zfsallsnap clone --mount -o readonly=on -o snapdir=hidden -o unige.ch:no_snapshots=on --clobber --destroyclones $DaySnap .backup >> $LogFile 2>&1
+         ServiceAction after
+      else
+         Log "Destroying clones '.backup'"
+         # delete all clones named .backup
+         /usr/local/bin/zfsallsnap destroyclone --destroyclones "@newdaily:.*" .backup >> $LogFile 2>&1
+         # destroying old daily backups
+         # since start and before are done in different invocations we
+         # need to find out what was the name of the snapshot
+         if [ -f  /nsr/tmp/snapshotdate ]; then
+            SnapDate=`cat /nsr/tmp/snapshotdate`
+            rm -f /nsr/tmp/snapshotdate
+            DaySnapPat=`expr "$SnapDate" : '^\([^_]*_\).*'`".*"
+            /usr/local/bin/zfsallsnap destroy --destroyclones "@daily:$DaySnapPat" >> $LogFile 2>&1
+            # rename new snapshot to daily snapshot
+            /usr/local/bin/zfsallsnap rename --clobber --destroyclones "@newdaily:$SnapDate" "daily:$SnapDate" >> $LogFile 2>&1
+         fi
+         # make sure that there are no other older @newdaily:... snapshots
+         /usr/local/bin/zfsallsnap destroy --destroyclones "@newdaily:.*" >> $LogFile 2>&1
+      fi
+   else
+      ServiceAction $Phase
+   fi
+fi
+
+Log "End '$CmdBase $Phase' on zone $MyZone"
+if [ "$MyZone" = "global" ]; then
+   if [ "$Phase" = "before" ]; then
+      Log "Starting Networker backup"
+      #...After exiting from this script, Networker will backup
+      #   the files specified in the Networker client definition,
+      #   and then execute the post-command file
+   else
+      Log "Finishing Networker backup"
+   fi
+fi
+exit 0

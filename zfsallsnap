@@ -1,0 +1,568 @@
+#!/bin/ksh -p
+#                                                         -*- ksh -*-
+  
+# zfsallsnap
+# Description:
+
+# Script to handle snapshots on all ZFS file systems in all pools
+# or under a particular ZFS pool, filesystem or volume.
+
+
+# zfsallsnap snapshot [-b|--backup] [-c|--clobber [-R|--destroyclones]]
+#            [-v|--verbose] [zfspath]@snapshot_suffix
+#  Take a recursive snapshot of all the ZFS file systems under the
+#  path zfspath. If zfspath is not specifed it will do it on  each
+#  zfs pool found on the sytem.
+#  snapshot_suffix will be the name of the new snapshots.
+#  With the backup option "-b", ZFS attributes and approximative snapshot
+#  date are saved in each file systems before the snapshot, for exploration
+#  purpose when restoring from tape.
+#  With option "-c" it will destroy first any existing snapshot with
+#  the same name.  Option "-R" indicates that the snapshot should be
+#  destroyed together with all its clones and dependants.
+
+
+# zfsallsnap destroy [-R|--destroyclones] [-v|--verbose] 
+#            [zfspath]@snapshot_suffix
+#  Destroy all snapshot with name snapshot_suffix under the path zfspath
+#  Option "-R" indicates that the snapshot should  be destroyed
+#  together with all its clones and dependants.
+
+# zfsallsnap rename [-c|--clobber [-R|--destroyclones]] [-v|--verbose]
+#            [zfspath]@snapshot_suffix newsnapshot_suffix
+#  Rename all snapshots named snapshot_suffix to newsnapshot_suffix
+#  under the path zfspath.
+#  With option "-c" it will destroy first any existing snapshot
+#  with the same name.  Option "-R" indicates that the snapshot should
+#  be destroyed together with all its clones and dependants.
+
+
+# zfsallsnap rollback [-R|--destroyclones] [-v|--verbose]
+#            [zfspath]@snapshot_suffix
+#  Rollback all ZFS file systems to the state of snapshot with name
+#  snapshot_suffix under the path zfspath.
+#  All snapshots with an intermediate date are destroyed.
+#  Option "-R" indicates that the snapshots should  be destroyed
+#  together with all their clones and dependants.
+
+# zfsallsnap clone [-c|--clobber [-R|--destroyclones]] [-o property=value]...
+#            [-m|--mount] [-v|--verbose] [zfspath]@snapshot_suffix clone_suffix
+#  Clone all snapshots under the path zfspath named snapshot_suffix to
+#  a file system whose name is the concatenation of the name
+#  of the file system of the snapshot and the clone_suffix
+#  With option "-c" it will destroy first any existing file system
+#  with the same name.  Option "-R" indicates that the file system should
+#  be destroyed together with all its clones and dependants.
+
+# zfsallsnap destroyclone [-R|--destroyclones] [-v|--verbose]
+#            [zfspath]@snapshot_suffix clone_suffix
+#  Destroy all clones whose name ends in clone_suffix that are
+#  a clone of the snapshot @snapshot_suffix  under the path zfspath.
+#  Option "-R" indicates that the file system should be destroyed
+#  together with all its clones and dependants.
+
+
+# Usage:
+# zfsallsnap snapshot [-b|--backup] [-c|--clobber [-R|--destroyclones]]
+#            [-v|--verbose] [zfspath]@snapshot_suffix
+# zfsallsnap destroy [-R|--destroyclones] [-v|--verbose]
+#            [zfspath]@snapshot_suffix
+# zfsallsnap rename [-c|--clobber [-R|--destroyclones]] [-v|--verbose]
+#            [zfspath]@snapshot_suffix newsnapshot_suffix
+# zfsallsnap rollback [-R|--destroyclones] [-v|--verbose]
+#            [zfspath]@snapshot_suffix
+# zfsallsnap clone [-m|--mount] [-c|--clobber [-R|--destroyclones]]
+#            [-o property=value]... [-v|--verbose]
+#            [zfspath]@snapshot_suffix clone_suffix
+# zfsallsnap destroyclone [-R|--destroyclones] [-v|--verbose]
+#            [zfspath]@snapshot_suffix clone_suffix
+# zfsallsnap list [zfspath]@snapshot_suffix
+# If zfspath is not specified  then the operation is performed on all
+# ZFS pools.
+
+# Example:
+#   zfsallsnap list @saved
+#   zfsallsnap snapshot --backup demo_pool@backup
+#   zfsallsnap rename --clobber --destroyclones @today yesterday
+# clone my_pool/fs@saved to my_pool/fs/restored :
+#   zfsallsnap clone -c -R --mount -o snapdir=hidden @saved restored
+#   zfsallsnap destroyclone -v -R @saved restored
+
+
+# Authors:
+# DP, Dominique.Petitpierre@unige.ch, University of Geneva
+
+# History
+# 2007.06.20: DP, Created from zfsallsnap;
+#             Restricted to one pool;
+#             Added -b option to save backup info;
+#             Backup info is removed after snapshot (occurs only in snapshot)
+# 2007.06.21: DP, argument syntax is now [zfspath]@snapshot_suffix
+# 2007.11.15: DP, added options -R, -c, -n, and actions list, clone and
+#             destroyclone
+# 2007.11.17: DP, added options -v, -o prop=val; improved mount when legacy
+# 
+# 2007.11.28: DP, fix for bug that slows down snapshot destruction.
+# 2008.04.09: DP, added the possibility to avoid snapshots of file systems
+#             that have the private property unige.ch:no_snapshots=on
+#             Useful when snapshots would take too much disk space.
+# 2008.04.16: DP, added a "ls -l $MountPoint/.zfs/snapshot" after a snapshot
+#             or a renamein order to allow access to .zfs/snapshot
+#             from local zones. It works around the "Not owner" bug
+#             that prevent access from a local zone.
+#             cf. http://mail.opensolaris.org/pipermail/zfs-discuss/2006-August/033728.html
+# 2008.09.26: DP, added per pool locking mechanism to prevent concurrent zfs
+#             commands to interfer with each other
+# 2008.11.12: DP, added an option to include volumes
+# 2009.10.05: DP, prevent cloning when original filesystem is not mounted
+# 2009.10.21: DP, removed "ls -l $MountPoint/.zfs/snapshot": not very useful
+#             and can cause a crash in the case snapshots where taken
+#             when the property mountpoint had the value "none" and then
+#             the fs is mounted.
+
+
+# To do:
+# - prevent race conditions when multiple zfsallsnap run concurrently,
+#   e.g. when writing zfs_get_*
+# - interactive option -i (cf mv, cp)
+# - debug option -d , show detailed operations
+# - better test caracter set in names to avoid confusion + enable regex
+#   matching
+# - mark file system with custom user properties
+#   (property=unige.ch:backup), and use it to select relevant ones
+# - improve performance: avoid scanning all zfs files at each step
+#   (keep the result to work upon in a variable: echo $Result | egrep...)
+# - use alias instead of function for "verbose"
+
+if [[ -n "$DEBUG" ]] ; then
+    set -x
+    set -v
+fi
+Cmd=${0##*/}
+Flags="$-"
+
+function usage {
+    if [[ "$Flags" = *x* ]]; then
+        set -x
+    fi
+    echo "Error: $1" 1>&2
+    echo "Usage:\n\
+$Cmd snapshot [-b|--backup] [-c|--clobber [-R|--destroyclones]]\n\
+           [-v|--verbose] [zfspath]@snapshot_suffix\n\
+$Cmd destroy [-R|--destroyclones] [-v|--verbose] [zfspath]@snapshot_suffix\n\
+$Cmd rename [-c|--clobber [-R|--destroyclones]] [-v|--verbose]\n\
+           [zfspath]@snapshot_suffix newsnapshot_suffix\n\
+$Cmd rollback [-R|--destroyclones] [-v|--verbose] [zfspath]@snapshot_suffix\n\
+$Cmd clone [-m|--mount] [-c|--clobber [-R|--destroyclones]] [-v|--verbose]\n\
+           [-o property=value]... [zfspath]@snapshot_suffix clone_suffix\n\
+$Cmd destroyclone [-R|--destroyclones] [-v|--verbose]\n\
+           [zfspath]@snapshot_suffix clone_suffix\n\
+$Cmd list [zfspath]@snapshot_suffix
+If zfspath is not specified then the operation is performed on all\n\
+ZFS pools." 1>&2
+    exit 1
+}
+
+# Error 2 "error message"
+# Error 0 "information message"
+function Error {
+    if [[ "$Flags" = *x* ]]; then
+        set -x
+    fi
+    ErrorStatus=$1
+    shift
+    if [[ $ErrorStatus -eq 0 ]]; then
+	printf "${Cmd}: " 1>&2
+    else
+	printf "${Cmd} error: " 1>&2
+    fi
+    printf "$*\n" 1>&2
+    exit $ErrorStatus
+}
+
+# verbose command
+# Print the command then execute it
+# Will work in simple cases, but could be messing up the command
+# depending on quoting or default expansions
+function verbose {
+   echo "$*"
+   set -o noglob
+   $*
+   set +o noglob
+}
+
+# Fix for  bug 6509628: trying to unmount the filesystem
+# will make destruction of dependant snapshots fast even
+# if files have been consulted under .zfs/snapshot
+# http://sunsolve.sun.com/search/document.do?assetkey=1-1-6509628-1
+# http://bugs.opensolaris.org/bugdatabase/view_bug.do?bug_id=6509628
+
+function fix_bug {
+    if [[ "$Flags" = *x* ]]; then
+        set -x
+    fi
+    if [[ "$1" = "-r" ]];then
+	MountPnts=$( mount | grep " on $2[/ ]" | cut -d' ' -f1 )
+    else
+	MountPnts=$( mount | grep " on $1 " | cut -d' ' -f1 )
+    fi
+    # for MountPnt in $MountPnts; do
+    #    # causing a "busy" error clears the potential problem 
+    #    (cd "$MountPnt"; umount "$MountPnt" >/dev/null 2>&1 )
+    # done
+}
+
+function unlock {
+    if [[ "$Flags" = *x* ]]; then
+	set -x
+    fi
+    if [[ -n "$UnlockFile" ]]; then
+	Temp="$UnlockFile"
+	UnlockFile=""
+	rm -f "$Temp"
+    fi
+}
+trap unlock INT QUIT KILL EXIT
+
+LockMaxWait=300 # seconds
+LockTimeout=86400 # seconds = 24 hours
+
+
+Dollar="\$"
+
+case "$1" in
+  snapshot|destroy|rollback|rename|clone|destroyclone|list)
+    Action="$1"
+    ;;
+  *)
+    usage "bad action: '$1'"
+    ;;
+esac
+shift
+while [[ "$1" = -* ]]; do
+  case "$1" in
+    -b|--backup)
+      if [[ "$Action" = "snapshot" ]]; then
+	SaveBackupInfo=1
+      else
+	usage "option -b is allowed only with 'snapshot'"
+      fi
+      ;;
+    -c|--clobber)
+      case "$Action" in
+	snapshot|rename|clone)
+	  Clobber="1"
+          ;;
+        *)
+	  usage "option -c is meaningful only with 'snapshot','rename' or 'clone'"
+	  ;;
+      esac
+      ;;
+    -i|--interactive)
+      Interactive="1"
+      ;;
+    -m|--mount)
+      if [[ "$Action" = "clone" ]]; then
+	MountClone=1
+      else
+	usage "option -m is allowed only with 'clone'"
+      fi
+      ;;
+    -n|--dryrun)
+      DryRun=1
+      Verbose="echo"
+      ;;
+    -o)
+      if [[ "$Action" = "clone" ]]; then
+	if [[ "$2" = *=* ]]; then
+	    PropertyList="$PropertyList $2"
+	    shift
+	else
+	    usage "bad property: '$2'"
+	fi
+      else
+	usage "option -o is allowed only with 'clone'"
+      fi
+      ;;
+    -R|--destroyclones)
+      DestroyClones="-R"
+      ;;
+    -v|--verbose)
+      Verbose="verbose"
+      ;;
+    *)
+      usage "bad option: '$1'"
+      ;;
+  esac
+  shift
+done
+if [[ "$1" = "" ]]; then
+  usage "missing argument for action '$Action'"   
+fi
+SnapshotBase="$1"
+shift
+case "$Action" in
+  rename)
+    if [[ "$1" = "" ]]; then
+      usage "missing newsnapshot_suffix argument"
+    fi
+    NewSnapshotSuffix="$1"
+    shift
+    ;;
+  clone|destroyclone)
+    if [[ "$1" = "" ]]; then
+      usage "missing clone_suffix argument"
+    fi
+    CloneSuffix="$1"
+    shift
+    ;;
+  *)
+    ;;
+esac
+if [[ "$#" -gt 0 ]]; then
+    usage "too many arguments"
+fi
+
+UpdateVersion=`sed -n -e 's/.*Solaris 10.*s10._\(u.\).*/\1/p' /etc/release`
+
+SnapshotSuffix=$( expr "$SnapshotBase" : '.*@\(.*\)' )
+ZfsPath=$( expr "$SnapshotBase" : '\(.*\)@.*' )
+if [[ "$SnapshotSuffix" = "" ]]; then
+    usage "'$SnapshotBase' is not of the form [zfspath]@snapshot_suffix"
+fi
+
+IllegalChars=$( echo "$CloneSuffix" | tr -d -c '@/' )
+if [[ "$IllegalChars" != "" ]]; then
+    usage "the clone suffix '$CloneSuffix' should not contain characters '@' or '/'"
+fi
+
+
+if [[ "$ZfsPath" = "" ]]; then
+    ZfsRoots=$( zpool list -H -o name )
+else
+    if zfs list -t filesystem,volume -H -o name | egrep -s "^$ZfsPath$Dollar" ; then
+	ZfsRoots="$ZfsPath"
+    else
+	usage "'$ZfsPath' is not a zfs filesystem or volume"
+    fi
+fi
+for ZfsRoot in $ZfsRoots ; do
+    if [[ "$Action" != "list" ]]; then
+	# take a lock for this zfs pool
+	ZfsPool="${ZfsRoot%%/*}"
+	LockFile="/var/run/unige_zfs_$ZfsPool.lock"
+	if /opt/sfw/bin/lockfile -! -l $LockTimeout -r $LockMaxWait -1 "$LockFile" ; then
+	    echo "$Cmd: no processing done, waited $LockMaxWait seconds before abandoning because ZFS pool '$ZfsPool' is locked"
+	      continue # for ZfsRoot in $ZfsRoots
+	fi
+	UnlockFile="$LockFile"
+    fi
+    FileSystems=$( zfs list -r -H -t filesystem,volume -o name "$ZfsRoot" )
+    case "$Action" in
+      snapshot)
+	Now=$( date +"%Y.%m.%d_%H:%M" )
+	for FileSystem in $FileSystems ; do
+	    if [[ "$SaveBackupInfo" = "1" ]]; then
+		# save ZFS attributes (also done by explorer) and snapshot
+		# time in all file systems
+		MountPoint=$( mount | fgrep " on $FileSystem " | cut -d' ' -f1 )
+		if [[ -n "$MountPoint" && "${MountPoint##*/}" != ".backup" ]] ; then
+		    InfoFiles=$( ls -a "$MountPoint" \
+			         | fgrep ".zfs_" )
+		    for InfoFile in $InfoFiles ; do
+			$Verbose rm "$MountPoint/$InfoFile"
+		    done
+		    FileSystemID=$( echo "$FileSystem\c" \
+				    | tr -c '[:alnum:].,:+-@#%;' '[_*]' )
+		    if [[ -n "$Verbose" ]]; then
+			echo zfs get all "$FileSystem" \>"$MountPoint/.zfs_get_all_${FileSystemID}.out"
+			echo zfs get -rHp all "$FileSystem" \>"$MountPoint/.zfs_get_-rHp_all_${FileSystemID}.out"
+		    fi
+                    if [[ "$DryRun" = "" ]]; then
+			zfs get all "$FileSystem" >"$MountPoint/.zfs_get_all_${FileSystemID}.out"
+			zfs get -rHp all "$FileSystem" >"$MountPoint/.zfs_get_-rHp_all_${FileSystemID}.out"
+		    fi
+		$Verbose touch "$MountPoint/.zfs_${FileSystemID}_snapshot_date=$Now"
+		fi
+	    fi
+	    if [[ "$Clobber" = "1" ]]; then
+	      # destroy individually the snapshots with the same name
+	      # to be sure to destroy them all even if the top one does not exist
+	      if zfs list -r -H -o name -t snapshot "$ZfsRoot" | egrep -s "^$FileSystem@$SnapshotSuffix$Dollar" ; then
+		  fix_bug -r "$FileSystem"
+		  $Verbose zfs destroy -r $DestroyClones "$FileSystem@$SnapshotSuffix"
+	      fi
+            fi
+	done
+	# synchronous snapshot of all file systems in pool
+	$Verbose zfs snapshot -r "$ZfsRoot@$SnapshotSuffix"
+	for FileSystem in $FileSystems ; do
+	    # remove snapshots of filesystems with property unige.ch:no_snapshots
+            # (cannot exclude it during a synchronous snapshot)
+	    NoSnap=$( zfs get -H -o value unige.ch:no_snapshots "$FileSystem" )
+	    if [[ "$NoSnap" = "on" ]]; then
+		$Verbose zfs destroy "$FileSystem@$SnapshotSuffix"
+	    fi
+	    MountPoint=$( mount | fgrep " on $FileSystem " | cut -d' ' -f1 )
+	    if [[ -n "$MountPoint" && "${MountPoint##*/}" != ".backup" ]] ; then
+		# list all snapshots (including new one) to fix the
+		# "Not owner" bug that prevent access from a local zone
+		# ls -l "$MountPoint/.zfs/snapshot" >/dev/null
+		# remove backup info
+		if [[ "$SaveBackupInfo" = "1" ]]; then
+		    InfoFiles=$( ls -a "$MountPoint" \
+			         | fgrep ".zfs_" )
+		    for InfoFile in $InfoFiles ; do
+			$Verbose rm "$MountPoint/$InfoFile"
+		    done
+		fi
+	    fi
+	done
+	;;
+     destroy)
+	for FileSystem in $FileSystems ; do
+	    fix_bug -r "$FileSystem"
+	    # destroy individually the snapshots with the same name
+	    # to be sure to destroy them all even if the top one does not exist
+	    SnapMatches=$( zfs list -r -H -o name -t snapshot "$ZfsRoot" \
+                           | egrep "^$FileSystem@$SnapshotSuffix$Dollar" )
+	    for Snap in $SnapMatches ; do
+		# check that the snapshot still exist (might have been
+		# destroyed in the previous recursive destroy)
+		if zfs list -r -H -o name -t snapshot "$ZfsRoot" | egrep -s "^$Snap$Dollar" ; then
+		    $Verbose zfs destroy -r $DestroyClones "$Snap"
+		fi
+	    done
+	done
+	;;
+     rename)
+	for FileSystem in $FileSystems ; do
+	    # destroy individually the snapshots with the same name
+	    # to be sure to destroy them all even if the top one does not exist
+	    if zfs list -r -H -o name -t snapshot "$ZfsRoot" | egrep -s "^$FileSystem@$SnapshotSuffix$Dollar" ; then
+		if [[ "$Clobber" = "1" ]]; then
+		    if zfs list -r -H -o name -t snapshot "$ZfsRoot" | egrep -s "^$FileSystem@$NewSnapshotSuffix$Dollar" ; then
+			fix_bug -r "$FileSystem"
+			$Verbose zfs destroy -r $DestroyClones "$FileSystem@$NewSnapshotSuffix"
+		    fi
+		fi
+		$Verbose zfs rename "$FileSystem@$SnapshotSuffix" "$FileSystem@$NewSnapshotSuffix"
+		MountPoint=$( mount | fgrep " on $FileSystem " | cut -d' ' -f1 )
+		if [[ -n "$MountPoint" ]] ; then
+		    # list all snapshots (including renamed one) to fix the
+		    # "Not owner" bug that prevent access from a local zone
+		    ls -l "$MountPoint/.zfs/snapshot" >/dev/null
+		fi
+	    fi
+	done
+	;;
+     rollback)
+       SnapshotDate=$( zfs get -H -o value creation "$ZfsRoot@$SnapshotSuffix" )
+       echo "rollback will destroy all snapshots newer than '$ZfsRoot@$SnapshotSuffix' ($SnapshotDate)"
+       read Agree?"OK to rollback? "
+       case "$Agree" in
+	 y*|Y*|o*|O*)
+	   Agree="yes"
+	   ;;
+	 *)
+	   Agree="no"
+	   ;;
+       esac
+       if [[ "$Agree" != "yes" ]] ; then
+	   Error 0 "nothing done"
+       fi
+       FileSystemInUse=0
+       for FileSystem in $FileSystems ; do
+	   # check if any file system is mounted
+	   MountPoint=$( mount | fgrep " on $FileSystem " | cut -d' ' -f1 )
+	   MountPoints="$MountPoints $MountPoint"
+	   MountedFileSystems="$MountedFileSystems $FileSystem"
+	   if [[ -n "$MountPoint" ]] ; then
+	       Fuser=$( fuser -cu $MountPoint 2>/dev/null )
+	       if [[ -n "$Fuser" ]]; then
+		   echo "Warning: fuser -c $MountPoint reports that file system is in use"
+		   FileSystemInUse=1
+	       fi
+	   fi
+       done
+       if [[ $FileSystemInUse -eq 1 ]]; then
+	   Error 2 "cannot unmount all file systems: please stop the relevant processes"
+       fi
+       for MountPoint in $MountPoints ; do
+	   if umount "$MountPoint" ; then
+	       echo "$MountPoint unmounted"
+	   else
+	       Error 3 "cannot unmount $MountPoint : aborting"
+	   fi
+       done
+       for MountedFileSystem in $MountedFileSystems ; do
+	   $Verbose zfs rollback -r $DestroyClones "$MountedFileSystem@$SnapshotSuffix"
+       done
+       for MountPoint in $MountPoints ; do
+	   mount "$MountPoint"
+       done
+       ;;
+      clone)
+	for FileSystem in $FileSystems ; do
+	    # destroy individually the snapshots with the same name
+	    # to be sure to destroy them all even if the top one does not exist
+	    if zfs list -r -H -o name -t snapshot "$ZfsRoot" | egrep -s "^$FileSystem@$SnapshotSuffix$Dollar" ; then
+		if [[ "$Clobber" = "1" ]]; then
+		    if zfs list -r -H -o name -t filesystem,volume "$ZfsRoot" | egrep -s "^$FileSystem/$CloneSuffix$Dollar" ; then
+			fix_bug -r "$FileSystem"
+			$Verbose zfs destroy -r $DestroyClones "$FileSystem/$CloneSuffix"
+		    fi
+		fi
+                MountPoint=$( mount | fgrep " on $FileSystem " | cut -d' ' -f1 )
+		if [[ -z "$MountPoint" ]] ; then
+		    echo "$Cmd: not cloning '$FileSystem@$SnapshotSuffix' because '$FileSystem' is not mounted"
+		    continue # for FileSystem in $FileSystems
+		fi
+		$Verbose zfs clone "$FileSystem@$SnapshotSuffix" "$FileSystem/$CloneSuffix"
+		for Property in $PropertyList ; do
+		    $Verbose zfs set "$Property"  "$FileSystem/$CloneSuffix"
+		done
+		CloneMountPoint=$( mount | fgrep "$FileSystem/$CloneSuffix" | cut -d' ' -f1 )
+		ZFSType=$( zfs get -H -o value type $FileSystem )
+		if [[ "$MountClone" = "1" \
+		      && "$ZFSType" = "filesystem" \
+		      && -z "$CloneMountPoint" \
+                      && -n "$MountPoint" ]]; then
+		    $Verbose mkdir -p "$MountPoint/$CloneSuffix"
+		    if [[ -n "$DryRun" ]]; then
+			# get inherited property
+			MountPointProperty=$( zfs get -o value -H mountpoint  "$FileSystem" )
+		    else
+			MountPointProperty=$( zfs get -o value -H mountpoint  "$FileSystem/$CloneSuffix" )
+		    fi
+		    if [[ "$MountPointProperty" = "legacy" || "$MountPointProperty" = "none" ]]; then
+			$Verbose mount -F zfs "$FileSystem/$CloneSuffix" "$MountPoint/$CloneSuffix"
+		    else 
+			$Verbose zfs set mountpoint="$MountPoint/$CloneSuffix" "$FileSystem/$CloneSuffix"
+		    fi
+		fi
+	    fi
+	done
+	;;
+      destroyclone)
+	for FileSystem in $FileSystems ; do
+	    # destroy clone only if clonesuffix and origin snapshot names match
+	    if zfs get -r -H -o name,value origin "$ZfsRoot" | egrep -s "^$FileSystem/$CloneSuffix	$FileSystem@$SnapshotSuffix$Dollar" ; then
+		fix_bug -r "$FileSystem"
+		$Verbose zfs destroy -r $DestroyClones "$FileSystem/$CloneSuffix"
+	    fi
+	done
+	;;
+     list)
+        Snapshots=$( zfs list -r -H -o name -t snapshot "$ZfsRoot" )
+	for FileSystem in $FileSystems ; do
+	    echo "$Snapshots" \
+            | egrep "^$FileSystem@$SnapshotSuffix$Dollar"
+	done
+	;;
+     esac
+    if [[ "$Action" != "list" ]]; then
+	# release the lock
+	unlock
+    fi
+done # for ZfsRoot in $ZfsRoots

@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# save all the pool
+# a configuration for a pool
+# save extra data such as :
+#   zfs mount
+#   zfs get -rHp all mediaprd_pool
+#   zfs get all mediaprd_pool
+#   date when the zfs backup occurs
+
+
+set -x
+
+
+export PATH=/usr/sbin:/usr/bin
+# make sure that "date" output does not depend on environement context
+export LANG=C
+
+zone_name=mediaprd_pool
+
+#
+# snapshot all the three under the pool mediaprd_pool
+/usr/local/bin/zfsallsnap snapshot --backup --clobber ${zone_name}@backup-tsm
+
+#
+# find out what is the FS for the zone mediaprd
+# and where they are mounted
+# and then backup them
+zfs list -t filesystem -r -H -o name ${zone_name} | sed 's|^| |' | sed 's|$| |'> /tmp/backup_mediaprd_zfsname
+mount | /usr/xpg4/bin/grep -f /tmp/backup_mediaprd_zfsname | cut -d ' ' -f1 > /tmp/backup_mediaprd_zfsmount
+#
+cat /tmp/backup_mediaprd_zfsmount | while read zfsmount ; do
+   snapshot_dir=${zfsmount}/.zfs/snapshot/backup-tsm
+   if [ ! -d ${snapshot_dir} ] ; then
+      echo "snapshot >${snapshot_dir}< not found" >&2
+   fi
+   echo dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir}
+done
+
+#
+# remove all the snapshot for mediaprd_pool
+/usr/local/bin/zfsallsnap destroy mediaprd_pool@backup-tsm
+
+exit 0
