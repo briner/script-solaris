@@ -1,0 +1,119 @@
+#!/bin/bash
+
+# save all the pool
+# a configuration for a pool
+# save extra data such as :
+#   zfs mount
+#   zfs get -rHp all mediaprd_pool
+#   zfs get all mediaprd_pool
+#   date when the zfs backup occurs
+
+Cmd=${0}
+
+usage() {
+    echo -e "Usage:\n\
+$Cmd [-n|--dryrun] [-v|--verbose] zpool_name\n "
+    exit 1
+}
+
+
+if [ -n "$DEBUG" ] ; then
+    set -x
+    set -v
+fi
+
+Verbose=0
+DryRun=0
+until [[ "$1" =~ "^[^-]" ]] ; do
+ 	case "$1" in
+		-n|--dryrun)
+			DryRun=1
+			Verbose=1
+			;;
+		-v|--verbose)
+			Verbose=1
+			;;
+		*)
+			usage
+			;;
+	esac
+	sleep 1
+	shift
+done
+
+(($Verbose)) && echo "verbose mode enable"
+(($DryRun)) && echo "dryrun mode enable"
+
+if [  "$#" != "1"  -o  "$1" = ""  ]; then
+    # it should rest only one argument at this time
+    usage
+fi
+SnapshotBase="$1"
+
+export PATH=/usr/sbin:/usr/bin
+# make sure that "date" output does not depend on environement context
+export LANG=C
+
+
+
+zone_name=$1
+
+#
+# check that there is a zfs with this name:
+zfs list -H -o name -t filesystem \
+  | /usr/sfw/bin/ggrep -q "^${zone_name}$" \
+  || { echo "can not backup zone : ${zone_name}, this is not a zfs FS" >&2 ;
+       exit 1;
+     }
+
+#
+#
+[[ -d /tmp/backup_tsm ]] || mkdir /tmp/backup_tsm 
+
+
+#
+# snapshot all the three under the pool mediaprd_pool
+if [ $Verbose -eq 1 ] ; then 
+	echo "snapshot all the three under the pool ${zone_name}"
+fi
+ 
+/usr/local/bin/zfsallsnap snapshot --backup --clobber ${zone_name}@backup-tsm
+
+#
+# list all the FS in the zone
+# and where they are mounted
+# and then backup them
+(( $Verbose )) && echo 'list all the FS in the zone ${zone_name}, and where they are mounted, to backed them up'
+
+zfs list -t filesystem -r -H -o name ${zone_name} \
+   | sed 's|^| |' | sed 's|$| |' \
+   > /tmp/backup_tsm/list_zfs_name.${zone_name}
+mount \
+   | /usr/xpg4/bin/grep -f /tmp/backup_tsm/list_zfs_name.${zone_name} \
+   | cut -d ' ' -f1 > /tmp/backup_tsm/list_zfs_mount.${zone_name}
+#
+cat /tmp/backup_tsm/list_zfs_mount.${zone_name} | while read zfsmount ; do
+   snapshot_dir=${zfsmount}/.zfs/snapshot/backup-tsm
+   if [ ! -d ${snapshot_dir} ] ; then
+      echo "snapshot >${snapshot_dir}< not found" >&2
+   fi
+   if [[ $Verbose -eq '1' ]] ; then
+	  echo dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir}
+   fi
+   if [[ $DryRun -ne '1' ]] ; then 
+      if [[ $Verbose -eq '1' ]] ; then
+         dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir}
+      else
+         dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir} &> /dev/null
+      fi
+   fi
+done
+
+#
+# remove all the snapshot for mediaprd_pool
+(( $Verbose )) && echo "remove all the snapshot for the pool ${zone_name}"
+/usr/local/bin/zfsallsnap destroy mediaprd_pool@backup-tsm
+(( $Verbose )) && echo "done"
+
+
+exit 0
