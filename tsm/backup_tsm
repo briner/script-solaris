@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# dsmc  incr -servername=mediaprd_pool /zones/mediaprd_pool/mediaprd/root/data/public/store/o -snapshotroot=/zones/mediaprd_pool/mediaprd/root/data/public/store/o/.zfs/snapshot/backup-tsm
+
 # save all the pool
 # a configuration for a pool
 # save extra data such as :
@@ -57,6 +59,7 @@ export LANG=C
 
 
 zone_name=$1
+snapshot_name='backup-tsm'
 
 #
 # check that there is a zfs with this name:
@@ -73,11 +76,9 @@ zfs list -H -o name -t filesystem \
 
 #
 # snapshot all the three under the pool mediaprd_pool
-if [ $Verbose -eq 1 ] ; then 
-	echo "snapshot all the three under the pool ${zone_name}"
-fi
+(($Verbose)) && echo "snapshot all the three under the pool ${zone_name} @ ${snapshot_name}"
  
-/usr/local/bin/zfsallsnap snapshot --backup --clobber ${zone_name}@backup-tsm
+/usr/local/bin/zfsallsnap snapshot --backup --clobber ${zone_name}@${snapshot_name}
 
 #
 # list all the FS in the zone
@@ -93,18 +94,20 @@ mount \
    | cut -d ' ' -f1 > /tmp/backup_tsm/list_zfs_mount.${zone_name}
 #
 cat /tmp/backup_tsm/list_zfs_mount.${zone_name} | while read zfsmount ; do
-   snapshot_dir=${zfsmount}/.zfs/snapshot/backup-tsm
+   snapshot_dir=${zfsmount}/.zfs/snapshot/${snapshot_name}
    if [ ! -d ${snapshot_dir} ] ; then
       echo "snapshot >${snapshot_dir}< not found" >&2
    fi
    if [[ $Verbose -eq '1' ]] ; then
-	  echo dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir}
+      echo ''
+	  echo dsmc incr -servername=${zone_name} ${zfsmount} -snapshotroot=${snapshot_dir}
+      echo ----------------------------------------------
    fi
    if [[ $DryRun -ne '1' ]] ; then 
       if [[ $Verbose -eq '1' ]] ; then
-         dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir}
+         dsmc incr -servername=${zone_name} ${zfsmount} -snapshotroot=${snapshot_dir}
       else
-         dsmc incr ${zfsmount} -snapshotroot=${snapshot_dir} &> /dev/null
+         dsmc incr -servername=${zone_name} ${zfsmount} -snapshotroot=${snapshot_dir} &> /dev/null
       fi
    fi
 done
@@ -112,7 +115,7 @@ done
 #
 # remove all the snapshot for mediaprd_pool
 (( $Verbose )) && echo "remove all the snapshot for the pool ${zone_name}"
-/usr/local/bin/zfsallsnap destroy mediaprd_pool@backup-tsm
+/usr/local/bin/zfsallsnap destroy ${zone_name}@${snapshot_name}
 (( $Verbose )) && echo "done"
 
 
