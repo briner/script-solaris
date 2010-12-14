@@ -1,4 +1,7 @@
 #!/usr/bin/python
+# add management of the lock
+# add management of the interruption
+# add logging systems
 # TODO: put a file accessible in the zone and in the master which gives info
 #       to be able to backup also within the zone
 # TODO: check saveset, and look how it manages the backup, by adding info such as
@@ -6,7 +9,8 @@
 #       and remove it at the end of the backup. Attention to remove it also when the
 #       the signal 15 arrives 
 # TODO: look what have be done on geneva2003 and africa-home
-# TODO: send email to the destination written in the alias of the zone 
+# TODO: send email to the destination written in the alias of the zone
+
 
 
 import os, sys, shutil
