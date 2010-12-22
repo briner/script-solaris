@@ -260,7 +260,7 @@ class NotifyError(object):
             sender=MEL_SENDER
             recipient=email
             subject='[tsm_zpool] from host (%s)' % hostname
-            recipient='cedric.briner@unige.ch'; subject+=' email (%s)'% email # 4debug
+#            recipient='cedric.briner@unige.ch'; subject+=' email (%s)'% email # 4debug
             if was_interrupted:
                 body="tsm_zpool was interrupted\n\n"+os.linesep.join(lmsg)
             else:
