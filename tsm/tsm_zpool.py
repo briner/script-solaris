@@ -32,7 +32,7 @@ VAR_DIR='/var/run'
 LOG_FILENAME='/var/log/tsm_zpool'
 DSM_SYS_FILENAME='/opt/tivoli/tsm/client/ba/bin/dsm.sys'
 MEL_SENDER='unix-noreply@unige.ch'
-LEMAIL_ROOT=['cedric.briner@unige.ch'] # 'unix-noreply@unige.ch'
+LEMAIL_ROOT=['unix-noreply@unige.ch']#['cedric.briner@unige.ch'] # 'unix-noreply@unige.ch'
 
 ZFS_LIST_CMD="zfs list -H -o name -t filesystem"
 ZFSALLSNAP_CMD="/usr/local/bin/zfsallsnap snapshot --backup --clobber %(zonename)s@%(snapname)s"
