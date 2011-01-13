@@ -24,7 +24,7 @@ import select
 import re
 import socket # for hostname
 
-SNAPNAME='tsmzpool.'+str(os.getpid())
+SNAPNAME_PREFIX='tsmzpool' 
 TMPDIR='/tmp/tsm_zpool'
 VERBOSE=False
 DRYRUN=False
@@ -32,7 +32,7 @@ VAR_DIR='/var/run'
 LOG_FILENAME='/var/log/tsm_zpool'
 DSM_SYS_FILENAME='/opt/tivoli/tsm/client/ba/bin/dsm.sys'
 MEL_SENDER='unix-noreply@unige.ch'
-LEMAIL_ROOT=['unix-noreply@unige.ch']#['cedric.briner@unige.ch'] # 'unix-noreply@unige.ch'
+LEMAIL_ROOT=['unix-bot@unige.ch']
 
 ZFS_LIST_CMD="zfs list -H -o name -t filesystem"
 ZFSALLSNAP_CMD="/usr/local/bin/zfsallsnap snapshot --backup --clobber %(zonename)s@%(snapname)s"
@@ -44,6 +44,9 @@ ZPOOL_LIST_CMD='zpool list -H -o name'
 ZFS_GET_CH_UNIGE_ZONEPATHS_CMD='zfs get -Ho name,value ch.unige:zonepaths %(lzfsname_with_space)s'
 RE_DSMC_ERROR=re.compile('ANS\S{5}')
 L_DSMC_ERROR_OK=['ANS1898I']
+PID=os.getpid()
+DATE_FORMAT='%Y.%m.%d-%H:%M'
+KEEP_SNAPSHOT=False # this is used in the options of tsm_zpool
 STR_NEW_DSM_SYS='''*
 * dsm.sys
 *
@@ -85,10 +88,13 @@ STR_NEW_DSM_SYS='''*
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', 0)
 
 my_logger = logging.getLogger('MyLogger')
-my_logger.setLevel(logging.DEBUG)
+my_logger.setLevel(logging.INFO)
+#my_logger.setLevel(logging.DEBUG)
 file_handler = logging.FileHandler(LOG_FILENAME)
 file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s") )
 my_logger.addHandler(file_handler)
+
+
 
 def to_stdout():
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -291,7 +297,10 @@ def check_if_zfs(zfsname):
     
 def zfsallsnap(zonename):
     my_logger.debug('enter in "zfsallsnap"')
-    inst_cmd=ZFSALLSNAP_CMD % {'zonename': zonename, 'snapname': SNAPNAME }
+    now=datetime.now()
+    str_now=now.strftime(DATE_FORMAT)
+    snapname='%s.%s.%s' % (SNAPNAME_PREFIX,str_now, str(PID)  )
+    inst_cmd=ZFSALLSNAP_CMD % {'zonename': zonename, 'snapname': snapname }
     my_logger.debug('zfsallsnap cmd:'+inst_cmd)
     proc=s.Popen(inst_cmd, stdout=s.PIPE, stderr=s.PIPE, shell=True, cwd='/')
     stdout, stderr = proc.communicate()
@@ -299,9 +308,13 @@ def zfsallsnap(zonename):
     if retcode != 0:
         my_logger.error('the cmd (%s) did not succeed' % inst_cmd)
         raise Exception( 'zfsallsnap problem')
+    return snapname
 
-def zfsremoveallsnap(zonename):
-    inst_cmd=ZFSREMOVEALLSNAP_CMD % {'zonename': zonename, 'snapname': SNAPNAME }
+def zfsremoveallsnap(zonename, snapname):
+    if KEEP_SNAPSHOT:
+        my_logger.info('do not remove the snapshot for the zone (%s)' % zonename)
+        return
+    inst_cmd=ZFSREMOVEALLSNAP_CMD % {'zonename': zonename, 'snapname': snapname }
     my_logger.debug('zfsremoveallsnap cmd:'+inst_cmd)
     proc=s.Popen(inst_cmd, stdout=s.PIPE, stderr=s.PIPE, shell=True, cwd='/')
     stdout, stderr = proc.communicate()
@@ -322,7 +335,7 @@ def get_dfs_mountpoint():
         dfs_mountpoint[out[2]]=out[0]
     return dfs_mountpoint
 
-def construct_lzfs_to_backup(zpoolname):
+def construct_lzfs_to_backup(zpoolname, snapname):
     proc=s.Popen(ZFS_LIST_CMD, stdout=s.PIPE, shell=True, cwd='/')
     lzfs=proc.stdout.readlines()
     lzfs=[zfs.rstrip() for zfs in lzfs]
@@ -339,7 +352,7 @@ def construct_lzfs_to_backup(zpoolname):
             my_logger.debug("zfs (%s) doesn't have a mountpoint" % zfs)
             continue
         #check that the mountpoint of the snapshot is there
-        snapshot_dirpath=zfs_dirpath+'/.zfs/snapshot/'+SNAPNAME
+        snapshot_dirpath=zfs_dirpath+'/.zfs/snapshot/'+snapname
         try:
             os.stat(snapshot_dirpath)
         except (KeyboardInterrupt, SystemExit):
@@ -654,7 +667,7 @@ def backup_directory(zfsdir, snapdir, zpool_conf):
                         my_logger.error("dsmc (out): %s" % stdout)
                         is_ok=False
                 if is_ok:
-                    my_logger.info("dsmc (out): %s" % stdout)
+                    my_logger.debug("dsmc (out): %s" % stdout)
         if proc.stderr in rlist:
             stderr=proc.stderr.readline()
             if stderr == '':
@@ -690,15 +703,15 @@ def backup_zpool(zpool_conf):
     #
     # snapshot zpool
     my_logger.info('snapshot (%s), and its childs pool' % zpool_conf.name)
-    zfsallsnap(zpool_conf.name)
+    snapname=zfsallsnap(zpool_conf.name)
     def remove_snapshot():
         my_logger.info('remove snapshot (%s), and its childs pool' % zpool_conf.name)
-        zfsremoveallsnap(zpool_conf.name)
+        zfsremoveallsnap(zpool_conf.name, snapname)
     callback_signal.add_task(remove_snapshot,'remove_snapshot')
     #
     # construct the list of zfs FS to backup
     my_logger.info('construct list of zfs to backup')
-    lzfsdir_snapdir=construct_lzfs_to_backup(zpool_conf.name)
+    lzfsdir_snapdir=construct_lzfs_to_backup(zpool_conf.name, snapname)
     #
     # backup it
     for zfsdir_snapdir in lzfsdir_snapdir:
@@ -707,7 +720,7 @@ def backup_zpool(zpool_conf):
     #
     # remove snapshot zpool
     my_logger.info('remove snapshot (%s), and its childs pool' % zpool_conf.name)
-    zfsremoveallsnap(zpool_conf.name)
+    zfsremoveallsnap(zpool_conf.name, snapname)
     callback_signal.del_task('remove_snapshot')
     my_logger.info('zpool (%s) backuped' % zpool_conf.name)
     #
@@ -720,7 +733,7 @@ if '__main__' == __name__:
     parser.add_option("-v", "--file"  , action="store_true", dest="isverbose", default=False)
     parser.add_option("-n", "--dryrun", action="store_true", dest="isdryrun", default=False, help='NOT IMPLEMENTED')
     parser.add_option("--no-email", action="store_false", dest="send_email", default=True, help='do not send any email')
-    parser.add_option("--keep-snapshot", action="store_true", dest="keep_snapshot", default=True, help='NOT IMPLEMENTED, do not remove snapshot after the backup (usefull to test recover)')
+    parser.add_option("--keep-snapshot", action="store_true", dest="keep_snapshot", default=False, help='do not remove snapshot after the backup (usefull to test recover)')
     (options, args) = parser.parse_args()
     lzpoolname=[] # if empty it means that we must backup every zones
     laction=[]
@@ -743,6 +756,9 @@ if '__main__' == __name__:
     if not laction:
         parser.print_help()
         sys.exit(1)
+    if options.keep_snapshot:
+        my_logger.info('option keep_snapshot enable')
+        KEEP_SNAPSHOT=True
     if 'generate_dsm' in laction:
         dzpool_conf=generate_dsm_n_get_dzpool_conf()
     if 'backup' in laction:
