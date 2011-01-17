@@ -1,4 +1,10 @@
 #!/usr/bin/python
+# 14.01.2010 cED gives the ability to provide dsm.sys in a static was
+#                the static files are located in
+#                /opt/tivoli/tsm/client/ba/bin/dsm.sys.d
+#                and the filename have carry the name of the zpool
+# 14.01.2010 cED be a bit more verbose in the info level, so it tells the number
+#                of file processes
 # 22.12.2010 cED add --no-email options
 # 22.12.2010 cED add discovering new zpool and place a dsm.sys template in it
 # 22.12.2010 cED add reading of <zone_root>/etc/aliases
@@ -10,9 +16,10 @@
 # 15.12.2010 cED catch ANS????? errors and treat them
 # TODO: length time to backup
 # TODO: put a file in the zone and in the master which gives info to be able to backup also within the zone
-# TODO: implement option --keep-snapshot
 # TODO: implement option --dry-run
-
+# TODO: tsm_zpool regarde qu'il est dans les crontabs
+# TODO: do a dsmc -servername to see if the password in entered correctly
+#       otherwise the tsm_zpool get hooked waiting for the stdin to give the password
 
 import os, sys, shutil
 from optparse import OptionParser
@@ -31,6 +38,7 @@ DRYRUN=False
 VAR_DIR='/var/run'
 LOG_FILENAME='/var/log/tsm_zpool'
 DSM_SYS_FILENAME='/opt/tivoli/tsm/client/ba/bin/dsm.sys'
+DSM_SYS_DIRNAME_STATIC='/opt/tivoli/tsm/client/ba/bin/dsm.sys.d'
 MEL_SENDER='unix-noreply@unige.ch'
 LEMAIL_ROOT=['unix-bot@unige.ch']
 
@@ -47,6 +55,10 @@ L_DSMC_ERROR_OK=['ANS1898I']
 PID=os.getpid()
 DATE_FORMAT='%Y.%m.%d-%H:%M'
 KEEP_SNAPSHOT=False # this is used in the options of tsm_zpool
+DSM_SYS_FILENAME_STATIC_README='''this directory ('''+DSM_SYS_DIRNAME_STATIC+''')
+allow to backup zpool with the tool tsm_zpool, for zpool which doesn't have
+a parameter : ch.unige:zonepaths
+'''
 STR_NEW_DSM_SYS='''*
 * dsm.sys
 *
@@ -73,7 +85,7 @@ STR_NEW_DSM_SYS='''*
 *    COMMMethod          TCPip
 *    TCPPort             1506
 *    TCPServeraddress    sos6.unige.ch
-*    NODENAME            mail-tstore1_pool
+*    NODENAME            %(servername)s
 *    PASSWORDACCESS      generate
 *    MAXCMDRETRIES 6
 *    RETRYPERIOD 10
@@ -93,8 +105,6 @@ my_logger.setLevel(logging.INFO)
 file_handler = logging.FileHandler(LOG_FILENAME)
 file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s") )
 my_logger.addHandler(file_handler)
-
-
 
 def to_stdout():
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -379,11 +389,13 @@ class DsmSys(object):
     RE_COMMENT=re.compile('\s*\*')
     RE_BLANK=re.compile('\s*$')
     RE_SERVERNAME=re.compile('\s*SE\S*\s+(\S*)')
-    RE_PARAMETERS=re.compile('\s*(\S+)\s+(\S+)')
+    RE_PARAMETERS=re.compile('\s*(\S+)\s+(\S.*)')
     def __init__(self, path=DSM_SYS_FILENAME):
         self.dservername={}
         self.path=path
-        self.construct(path)
+        self._construct(path)
+    def get_is_empty(self):
+        return not self.dservername
     def _get_lservername(self):
         ret=self.dservername.keys()
         ret.sort()
@@ -398,10 +410,11 @@ class DsmSys(object):
             msg='DsmSys object contruct from (%s) should have only one servername' % self.path
             my_logger.warning(msg)
             raise Exception(msg)
-    def construct(self, fnpath):
+    def _construct(self, fnpath):
         fhpath=open(fnpath,'r')
         self.lline=fhpath.readlines()
         fhpath.close()
+        servername=''
         for line in self.lline:
             if self.RE_COMMENT.match(line) or self.RE_BLANK.match(line):
                 continue
@@ -414,8 +427,13 @@ class DsmSys(object):
             match=self.RE_PARAMETERS.match(line)
             if match:
                 parameter,value=match.groups()
-                self.dservername[servername]['lparameter_value'].append( (parameter, value) )
-                self.dservername[servername]['lline'].append(line.rstrip())
+                if servername:
+                    self.dservername[servername]['lparameter_value'].append( (parameter, value.rstrip()) )
+                    self.dservername[servername]['lline'].append(line.rstrip())
+                else:
+                    my_logger.debug('file (%s) is not a well formed' % fnpath)
+                    return
+                
     def __repr__(self):
         ll=[]
         ll.append( 'path: %s' % self.path)
@@ -465,7 +483,7 @@ class DsmSys(object):
         return 0
     def get_if_servername_is_backupable(self, servername=None):
         if servername==None:
-            servername=self.get_unique_servername
+            servername=self.get_unique_servername()
             if not servername:
                 return False
         ddata=self.dservername.get(servername)
@@ -488,7 +506,7 @@ def generate_dsm_n_get_dzpool_conf():
         zpoolname=out.rstrip()
         dzpool_conf[zpoolname]=ZpoolConf(zpoolname)
     if not dzpool_conf:
-        return {}  
+        return {}
     #
     # get ch.unige:zonepaths 
     cmd=ZFS_GET_CH_UNIGE_ZONEPATHS_CMD % { 'lzfsname_with_space' :' '.join(dzpool_conf.keys()) }
@@ -549,6 +567,7 @@ def generate_dsm_n_get_dzpool_conf():
             notify_error.add(lemail, 'new zpool discovered, edit dsm.sys (%s), and configure it' % fn_new_dsm_sys)
     #
     # get dsm.sys on Virtual Node
+    my_logger.debug('generate_dsm_n_get_dzpool_conf > get dsm.sys on Virtual Node')
     for zpool_conf in dzpool_conf.itervalues():
         if not zpool_conf.lch_unige_zonepath:
             continue
@@ -559,13 +578,50 @@ def generate_dsm_n_get_dzpool_conf():
                 zpool_conf.dsm_sys=DsmSys(fn_dsm_sys)
                 continue
     #
-    # get dsm.sys on physical node
+    # get dsm.sys static from DSM_SYS_DIRNAME_STATIC
+    #     ( /opt/tivoli/tsm/client/ba/bin/dsm.sys.d )
+    my_logger.debug('generate_dsm_n_get_dzpool_conf > read dsm.sys static dir (%s)' % DSM_SYS_DIRNAME_STATIC)
+    if not os.path.isdir(DSM_SYS_DIRNAME_STATIC):
+        os.makedirs(DSM_SYS_DIRNAME_STATIC)
+    fn_dsm_sys_static_readme=os.path.join(DSM_SYS_DIRNAME_STATIC, 'README')
+    if not os.path.isfile(fn_dsm_sys_static_readme):
+        fh_dsm_sys_static_readme=open(fn_dsm_sys_static_readme,'w')
+        fh_dsm_sys_static_readme.write(DSM_SYS_FILENAME_STATIC_README)
+        fh_dsm_sys_static_readme.close()
+    for zpoolname in os.listdir(DSM_SYS_DIRNAME_STATIC):
+        fn_dsm_sys_of_zpoolname=os.path.join(DSM_SYS_DIRNAME_STATIC, zpoolname)        
+        if not os.path.isfile(fn_dsm_sys_of_zpoolname):
+            continue
+        dsm_sys=DsmSys(fn_dsm_sys_of_zpoolname)
+        if dsm_sys.get_is_empty():
+            continue
+        if not dzpool_conf.has_key(zpoolname):
+            msg='attention there is no zpool (%s) as defined is the dsm.sys (%s), please remove the dsm.sys' % (zpoolname, fn_dsm_sys_of_zpoolname)
+            my_logger.warning(msg)
+            lemail=LEMAIL_ROOT
+            notify_error.add(lemail, msg)
+            continue
+        if dzpool_conf[zpoolname].dsm_sys:
+            if not dzpool_conf[zpoolname].dsm_sys.get_is_empty():
+                msg='zpool (%(zpoolname)s) has two dsm.sys: one in (%(dsm_sys_in_zpool)s) inside the zpool\
+, the other (%(dsm_sys_in_static_dir)s) in the static dir, please remove one of the dsm.sys\
+, the dsm.sys (%(dsm_sys_in_zpool)s) in the zpool will be used' % {'zpoolname':zpoolname
+                                                                  ,'dsm_sys_in_zpool':dzpool_conf[zpoolname].dsm_sys.path
+                                                                  ,'dsm_sys_in_static_dir': fn_dsm_sys_of_zpoolname}
+                my_logger.warning(msg)
+                lemail=list( set(LEMAIL_ROOT).union(set(dzpool_conf[zpoolname].lemail_root)) )
+                notify_error.add(lemail, msg)
+        dzpool_conf[zpoolname].dsm_sys=dsm_sys
+    #
+    # get dsm.sys on physical node the generated one
+    my_logger.debug('generate_dsm_n_get_dzpool_conf > get dsm.sys on physical node the generated one')
     if os.path.isfile(DSM_SYS_FILENAME):
         dsm_sys_global=DsmSys(DSM_SYS_FILENAME)
     else:
         dsm_sys_global=None
     #
     # check dsm.sys collected are the same as the global dsm.sys
+    my_logger.debug('generate_dsm_n_get_dzpool_conf > check dsm.sys collected are the same as the global dsm.sys')
     must_create_new_dsm_sys=False
     for servername in dsm_sys_global.dservername.keys():
         #
@@ -657,34 +713,44 @@ def backup_directory(zfsdir, snapdir, zpool_conf):
                 read_set.remove(proc.stdout)
             else:
                 stdout=stdout.rstrip()
-                re_ret=RE_DSMC_ERROR.search(stdout)
+                re_ret=RE_DSMC_ERROR.match(stdout)
+                msg="dsmc (out): %s" % stdout
                 is_ok=True
                 if re_ret:
-                    if re_ret.group() not in L_DSMC_ERROR_OK:
+                    error_code=re_ret.group()
+                    if error_code == 'ANS1898I': #ANS1898I ***** Processed     7,000 files *****
+                        my_logger.info(msg)
+                    elif error_code not in L_DSMC_ERROR_OK:
                         lbody_email=['dsm.sys in (%s)' % zpool_conf.dsm_sys.path
-                                    ,'zfsdir (%s) - %s' % (zfsdir, stdout)]
+                                    ,' - zfsdir (%s)' % zfsdir
+                                    ,' - %s' % msg]
                         notify_error.add(zpool_conf.lemail_root, lbody_email)
-                        my_logger.error("dsmc (out): %s" % stdout)
+                        my_logger.error(msg)
                         is_ok=False
                 if is_ok:
-                    my_logger.debug("dsmc (out): %s" % stdout)
+                    my_logger.debug(msg)
         if proc.stderr in rlist:
             stderr=proc.stderr.readline()
             if stderr == '':
                 read_set.remove(proc.stderr)
             else:
                 stderr=stderr.rstrip()
-                re_ret=RE_DSMC_ERROR.search(stderr)
+                re_ret=RE_DSMC_ERROR.match(stderr)
+                msg="dsmc (err): %s" % stderr
                 is_ok=True
                 if re_ret:
-                    if re_ret.group not in L_DSMC_ERROR_OK :
+                    error_code=re_ret.group()
+                    if error_code == 'ANS1898I': #ANS1898I ***** Processed     7,000 files *****
+                        my_logger.info(msg)
+                    elif error_code not in L_DSMC_ERROR_OK :
                         lbody_email=['dsm.sys in (%s)' % zpool_conf.dsm_sys.path
-                                    ,'zfsdir (%s) - %s' % (zfsdir, stderr)]
+                                    ,' - zfsdir (%s)' % zfsdir
+                                    ,' - %s' % msg]
                         notify_error.add(zpool_conf.lemail_root, lbody_email)
-                        my_logger.error("dsmc (err): %s" % stderr)
+                        my_logger.error(msg)
                         is_ok=False
                 if is_ok:
-                    my_logger.info("dsmc (err): %s" % stderr)
+                    my_logger.info(msg)
     callback_signal.del_task('stop_backup_directory')
     
 #def backup_zpool(zpoolname, tsm_servername):
@@ -729,7 +795,8 @@ def backup_zpool(zpool_conf):
 
 if '__main__' == __name__:
     parser = OptionParser(usage='''%prog [-vn] backup [zpool_name  [...] ]
-       %prog [-vn] generate_dsm''')
+       %prog [-vn] generate-dsm
+       %prog [-vn] list-zpool''')
     parser.add_option("-v", "--file"  , action="store_true", dest="isverbose", default=False)
     parser.add_option("-n", "--dryrun", action="store_true", dest="isdryrun", default=False, help='NOT IMPLEMENTED')
     parser.add_option("--no-email", action="store_false", dest="send_email", default=True, help='do not send any email')
@@ -744,11 +811,13 @@ if '__main__' == __name__:
     if options.isdryrun:
         DRYRUN=True
     if len(args) == 1:
-        if args[0] == 'generate_dsm':
+        if args[0] == 'generate-dsm':
             laction='[generate_dsm]'
         if args[0] == 'backup':
             laction='[generate_dsm, backup]'
             lzpoolname=[]
+        if args[0] == 'list-zpool':
+            laction=['generate_dsm','list_zpool']
     if len(args) > 1:
         if args[0] == 'backup':
             laction='[generate_dsm, backup]'
@@ -761,6 +830,13 @@ if '__main__' == __name__:
         KEEP_SNAPSHOT=True
     if 'generate_dsm' in laction:
         dzpool_conf=generate_dsm_n_get_dzpool_conf()
+    if 'list_zpool' in laction:
+        for servername,zpool_conf in dzpool_conf.iteritems():
+            if zpool_conf.dsm_sys:
+                if zpool_conf.dsm_sys.get_if_servername_is_backupable():
+                    print servername, 'backupable'
+                    continue
+            print servername, 'not backupable'
     if 'backup' in laction:
         #
         # restrict the dictionnary of dzpool_conf, to the one specifed in the cli
@@ -779,8 +855,9 @@ if '__main__' == __name__:
         #
         # do the backup for this (zpoolname)
         for zpoolname, zpool_conf in dzpool_conf_to_backup.iteritems():
-            if zpool_conf.dsm_sys.get_if_servername_is_backupable(zpoolname):
-                backup_zpool(zpool_conf)
+            if zpool_conf.dsm_sys:
+                if zpool_conf.dsm_sys.get_if_servername_is_backupable(zpoolname):
+                    backup_zpool(zpool_conf)
     #
     # send notification
     notify_error.send()
