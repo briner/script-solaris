@@ -1,9 +1,12 @@
 #!/usr/bin/python
-# 14.01.2010 cED gives the ability to provide dsm.sys in a static was
+# 19.01.2011 cED change the paramaters of zfsallsnap by adding the option:
+#                --ignoreno_snapshots which bypass the parameter
+#                unige.ch:no_snapshots  on stored on the zfs metadata
+# 14.01.2011 cED gives the ability to provide dsm.sys in a static was
 #                the static files are located in
 #                /opt/tivoli/tsm/client/ba/bin/dsm.sys.d
 #                and the filename have carry the name of the zpool
-# 14.01.2010 cED be a bit more verbose in the info level, so it tells the number
+# 14.01.2011 cED be a bit more verbose in the info level, so it tells the number
 #                of file processes
 # 22.12.2010 cED add --no-email options
 # 22.12.2010 cED add discovering new zpool and place a dsm.sys template in it
@@ -41,9 +44,11 @@ DSM_SYS_FILENAME='/opt/tivoli/tsm/client/ba/bin/dsm.sys'
 DSM_SYS_DIRNAME_STATIC='/opt/tivoli/tsm/client/ba/bin/dsm.sys.d'
 MEL_SENDER='unix-noreply@unige.ch'
 LEMAIL_ROOT=['unix-bot@unige.ch']
+#LEMAIL_ROOT=['cedric.briner@unige.ch']
+
 
 ZFS_LIST_CMD="zfs list -H -o name -t filesystem"
-ZFSALLSNAP_CMD="/usr/local/bin/zfsallsnap snapshot --backup --clobber %(zonename)s@%(snapname)s"
+ZFSALLSNAP_CMD="/usr/local/bin/zfsallsnap snapshot --backup --clobber --ignoreno_snapshots %(zonename)s@%(snapname)s"
 ZFSREMOVEALLSNAP_CMD="/usr/local/bin/zfsallsnap destroy %(zonename)s@%(snapname)s"
 MOUNT_CMD='/usr/sbin/mount'
 DSMC_BACKUP='dsmc incr -servername=%(servername)s %(zfsdir)s -snapshotroot=%(snapdir)s'
@@ -55,6 +60,7 @@ L_DSMC_ERROR_OK=['ANS1898I']
 PID=os.getpid()
 DATE_FORMAT='%Y.%m.%d-%H:%M'
 KEEP_SNAPSHOT=False # this is used in the options of tsm_zpool
+
 DSM_SYS_FILENAME_STATIC_README='''this directory ('''+DSM_SYS_DIRNAME_STATIC+''')
 allow to backup zpool with the tool tsm_zpool, for zpool which doesn't have
 a parameter : ch.unige:zonepaths
@@ -210,6 +216,7 @@ def send_email(sender, recipient, subject, body):
 #
 # here we go
 #
+
 class Lock(object):
     def remove(self):
         os.remove(self.fn_lock)
@@ -368,7 +375,10 @@ def construct_lzfs_to_backup(zpoolname, snapname):
         except (KeyboardInterrupt, SystemExit):
             raise
         except:
-            my_logger.error("zfs (%s) doesn't have a mountpoint (%s) for the snapshot" % (zfs, snapshot_dirpath))
+            msg="zfs (%s) doesn't have a mountpoint (%s) for the snapshot" % (zfs, snapshot_dirpath)
+            my_logger.error(msg)
+            lemail=list( set(LEMAIL_ROOT).union(set(dzpool_conf[zpoolname].lemail_root)) )
+            notify_error.add(lemail, msg)
             continue
         lzfsdir_snapdir.append([zfs_dirpath, snapshot_dirpath])
     return lzfsdir_snapdir
